@@ -1,8 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.nn.modules.utils import _single, _pair, _triple
-import math
+from torch.nn.modules.utils import _pair
 
 from .utils import _SimpleSegmentationModel
 
@@ -10,47 +9,29 @@ from .utils import _SimpleSegmentationModel
 __all__ = ["DeepLabV3"]
 
 
-class CustomConv(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=0, dilation=2, mu=0.1, *args, **kwargs):
+class CustomConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=2, mu=0.1, bias=False, *args, **kwargs):
         super(CustomConv, self).__init__()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.kernel_size = _pair(kernel_size)
+        self.in_channels = in_channels
         self.out_channels = out_channels
+        self.kernel_size = _pair(kernel_size)  # all pairs are considered to be of form (n, n)
         self.dilation = _pair(dilation)
         self.padding = _pair(padding)
         self.stride = _pair(stride)
-        self.in_channels = in_channels
         self.mu = mu
-        self.mu_ = (1 - mu) / 3
-        self.bias1 = torch.nn.Parameter(torch.Tensor(out_channels)).to(self.device)
+        self.fuzzy_weight = nn.Parameter(torch.Tensor(out_channels))
 
-        self.calculated_kernel_size = self.dilation[0] * (self.kernel_size[0] - 1) + 1
-        self.weight = nn.Conv2d(self.in_channels, self.out_channels, self.kernel_size[0], dilation=dilation, stride=stride, *args, **kwargs).to(self.device)
-        self.fuzzy_weight = nn.Conv2d(self.in_channels, self.out_channels, self.calculated_kernel_size, stride=stride, *args, **kwargs)
-
-        self.fuz = self.mask_dial(self.kernel_size[0], self.dilation[0], self.mu)
-        self.fuz[self.fuz == 1] = 0
-        self.fuz = self.fuz.unsqueeze(0)
-
-        temp = self.fuz
-        for i in range(1, self.in_channels):
-            temp = torch.cat((temp, self.fuz))
-        temp = temp.unsqueeze(0)
-        temp1 = temp
-        for i in range(1, self.out_channels):
-            temp1 = torch.cat((temp1, temp))
-        self.fuz = temp1
-        """if(bias):
-            self.bias=torch.nn.Parameter(torch.Tensor(out_channels))"""
-        """else:
-            self.register_parameters("bias",None)"""
-
+        self.calculated_kernel_size = (self.dilation[0] * (self.kernel_size[0] - 1) + 1, self.dilation[1] * (self.kernel_size[1] - 1) + 1)
+        self.conv = nn.Conv2d(self.in_channels, self.out_channels, self.kernel_size[0], dilation=dilation, stride=stride, bias=bias, *args, **kwargs)
+        self.fuzzy_conv = nn.Conv2d(self.in_channels, 1, self.calculated_kernel_size, stride=stride, bias=False, *args, **kwargs)
+        shape = self.fuzzy_conv.weight.shape
+        del self.fuzzy_conv.weight
+        self.fuz = self.mask_dial(self.kernel_size[0], self.dilation[0], self.mu).broadcast_to(shape)
         with torch.no_grad():
-            self.fuzzy_weight.weight = nn.Parameter(self.fuz)
-            self.fuzzy_weight.weight.requires_grad = False
-        self.fuzzy_weight = self.fuzzy_weight.to(self.device)
-        # self.reset_parameters()
+            self.fuzzy_conv.weight = nn.Parameter(self.fuz, requires_grad=False)
+
+        nn.init.kaiming_uniform_(self.conv.weight)
 
     def mask_dial(self, kernel_size, dilation, mu):
         dilation -= 1
@@ -98,23 +79,19 @@ class CustomConv(torch.nn.Module):
         result = torch.Tensor(result)
         return result
 
-    def reset_parameters(self):
-        stdv = math.sqrt(6.0 / ((self.in_channels * (self.kernel_size[0] ** 2)) + (self.out_channels * (self.kernel_size[0] ** 2))))
-        self.weight.data.uniform_(-stdv, stdv)
-        """if self.bias is not None:
-            self.bias.data.uniform_(-stdv,stdv)
-        self.bias1.data.uniform_(-stdv,stdv)"""
-
     def forward(self, input_):
         if self.padding[0] > 0:
-            padr = torch.zeros(input_.size()[0], input_.size()[1], input_.size()[2], self.padding[0]).to(self.device)
-            padc = torch.zeros(input_.size()[0], input_.size()[1], self.padding[1], input_.size()[3] + self.padding[0] * 2).to(self.device)
-            input_ = torch.cat((input_, padr), 3).to(self.device)
-            input_ = torch.cat((padr, input_), 3).to(self.device)
-            input_ = torch.cat((input_, padc), 2).to(self.device)
-            input_ = torch.cat((padc, input_), 2).to(self.device)
+            padr = torch.zeros(input_.size()[0], input_.size()[1], input_.size()[2], self.padding[0])
+            padc = torch.zeros(input_.size()[0], input_.size()[1], self.padding[1], input_.size()[3] + self.padding[0] * 2)
+            input_ = torch.cat((input_, padr), 3)
+            input_ = torch.cat((padr, input_), 3)
+            input_ = torch.cat((input_, padc), 2)
+            input_ = torch.cat((padc, input_), 2)
 
-        return self.weight(input_) + (self.fuzzy_weight(input_).permute(0, 2, 3, 1) * self.bias1).permute(0, 3, 1, 2)
+        conv_out = self.conv(input_)
+        fuzzy_out = (self.fuzzy_conv(input_).permute(0, 2, 3, 1) * self.fuzzy_weight).permute(0, 3, 1, 2)
+
+        return conv_out + fuzzy_out.broadcast_to(conv_out.shape)
 
 
 class DeepLabV3(_SimpleSegmentationModel):
@@ -161,7 +138,8 @@ class DeepLabHeadV3Plus(nn.Module):
     def _init_weight(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight)
+                if m.weight.requires_grad:
+                    nn.init.kaiming_normal_(m.weight)
             elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
@@ -222,7 +200,8 @@ class AtrousSeparableConvolution(nn.Module):
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
         modules = [
-            nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
+            # nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
+            CustomConv(in_channels, out_channels, kernel_size=3, padding=dilation, dilation=dilation, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         ]
