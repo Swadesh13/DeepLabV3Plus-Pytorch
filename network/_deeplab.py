@@ -85,8 +85,8 @@ class CustomConv(nn.Module):
 
     def forward(self, input_):
         if self.padding[0] > 0:
-            padr = torch.zeros(input_.size()[0], input_.size()[1], input_.size()[2], self.padding[0])
-            padc = torch.zeros(input_.size()[0], input_.size()[1], self.padding[1], input_.size()[3] + self.padding[0] * 2)
+            padr = torch.zeros(input_.size()[0], input_.size()[1], input_.size()[2], self.padding[0]).to(input_.device)
+            padc = torch.zeros(input_.size()[0], input_.size()[1], self.padding[1], input_.size()[3] + self.padding[0] * 2).to(input_.device)
             input_ = torch.cat((input_, padr), 3)
             input_ = torch.cat((padr, input_), 3)
             input_ = torch.cat((input_, padc), 2)
