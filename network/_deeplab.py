@@ -34,6 +34,7 @@ class CustomConv(nn.Module):
         self.fuz = self.mask_dial(self.kernel_size[0], self.dilation[0], self.mu).broadcast_to(shape)
         with torch.no_grad():
             self.fuzzy_conv.weight = nn.Parameter(self.fuz, requires_grad=False)
+            self.fuzzy_conv.requires_grad_(False)
 
         nn.init.kaiming_uniform_(self.conv.weight)
 
