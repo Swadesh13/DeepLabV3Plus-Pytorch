@@ -118,7 +118,7 @@ class DeepLabV3(_SimpleSegmentationModel):
 
 
 class DeepLabHeadV3Plus(nn.Module):
-    def __init__(self, in_channels, low_level_channels, num_classes, aspp_dilate=[12, 24, 36]):
+    def __init__(self, in_channels, low_level_channels, num_classes, aspp_dilate=[12, 24, 36], stride_rates=[1, 1, 1]):
         super(DeepLabHeadV3Plus, self).__init__()
         self.project = nn.Sequential(
             nn.Conv2d(low_level_channels, 48, 1, bias=False),
@@ -126,7 +126,7 @@ class DeepLabHeadV3Plus(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.aspp = ASPP(in_channels, aspp_dilate)
+        self.aspp = ASPP(in_channels, aspp_dilate, stride_rates)
 
         self.classifier = nn.Sequential(
             nn.Conv2d(304, 256, 3, padding=1, bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True), nn.Conv2d(256, num_classes, 1)
@@ -225,7 +225,7 @@ class ASPPPooling(nn.Sequential):
 
 
 class ASPP(nn.Module):
-    def __init__(self, in_channels, atrous_rates, stride_rates=[1, 2, 4]):
+    def __init__(self, in_channels, atrous_rates, stride_rates=[1, 1, 1]):
         super(ASPP, self).__init__()
         out_channels = 256
         modules = []
