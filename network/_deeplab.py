@@ -202,10 +202,10 @@ class AtrousSeparableConvolution(nn.Module):
 
 
 class ASPPConv(nn.Sequential):
-    def __init__(self, in_channels, out_channels, dilation):
+    def __init__(self, in_channels, out_channels, dilation, stride):
         modules = [
             # nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
-            CustomConv(in_channels, out_channels, kernel_size=3, padding=dilation, dilation=dilation, bias=False),
+            CustomConv(in_channels, out_channels, kernel_size=3, stride=stride, padding=dilation, dilation=dilation, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         ]
@@ -225,16 +225,17 @@ class ASPPPooling(nn.Sequential):
 
 
 class ASPP(nn.Module):
-    def __init__(self, in_channels, atrous_rates):
+    def __init__(self, in_channels, atrous_rates, stride_rates=[1, 2, 4]):
         super(ASPP, self).__init__()
         out_channels = 256
         modules = []
         modules.append(nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True)))
 
         rate1, rate2, rate3 = tuple(atrous_rates)
-        modules.append(ASPPConv(in_channels, out_channels, rate1))
-        modules.append(ASPPConv(in_channels, out_channels, rate2))
-        modules.append(ASPPConv(in_channels, out_channels, rate3))
+        stride1, stride2, stride3 = tuple(stride_rates)
+        modules.append(ASPPConv(in_channels, out_channels, rate1, stride1))
+        modules.append(ASPPConv(in_channels, out_channels, rate2, stride2))
+        modules.append(ASPPConv(in_channels, out_channels, rate3, stride3))
         modules.append(ASPPPooling(in_channels, out_channels))
 
         self.convs = nn.ModuleList(modules)
