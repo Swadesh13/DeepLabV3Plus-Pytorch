@@ -2,20 +2,20 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.modules.utils import _pair
-
+import numpy as np
 from .utils import _SimpleSegmentationModel
 
 
 __all__ = ["DeepLabV3"]
 
 
-class CustomConv(nn.Module):
+class FuzzyConv(nn.Module):
     """
     Fuzzy Conv Layer
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=2, mu=0.1, bias=False, *args, **kwargs):
-        super(CustomConv, self).__init__()
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, mu=0.1, bias=False, *args, **kwargs):
+        super(FuzzyConv, self).__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -24,79 +24,34 @@ class CustomConv(nn.Module):
         self.padding = _pair(padding)
         self.stride = _pair(stride)
         self.mu = mu
-        self.fuzzy_weight = nn.Parameter(torch.Tensor(out_channels))
 
-        self.calculated_kernel_size = (self.dilation[0] * (self.kernel_size[0] - 1) + 1, self.dilation[1] * (self.kernel_size[1] - 1) + 1)
-        self.conv = nn.Conv2d(self.in_channels, self.out_channels, self.kernel_size[0], dilation=dilation, stride=stride, bias=bias, *args, **kwargs)
-        self.fuzzy_conv = nn.Conv2d(self.in_channels, 1, self.calculated_kernel_size, stride=stride, bias=False, *args, **kwargs)
-        shape = self.fuzzy_conv.weight.shape
-        del self.fuzzy_conv.weight
-        self.fuz = self.mask_dial(self.kernel_size[0], self.dilation[0], self.mu).broadcast_to(shape)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, bias=bias, *args, **kwargs)
+        self.fuzzy_conv = nn.Conv2d(
+            in_channels, in_channels, kernel_size=(self.dilation[0] + 1, self.dilation[1] + 1), padding="same", groups=in_channels, bias=False
+        )
+        self.fuzzy_weights = self.fuzzy_filter()
         with torch.no_grad():
-            self.fuzzy_conv.weight = nn.Parameter(self.fuz, requires_grad=False)
+            assert (
+                self.fuzzy_conv.weight.shape == self.fuzzy_weights.shape
+            ), f"Weight shape not matching, {self.fuzzy_weights.shape} vs {self.fuzzy_conv.weight.shape}"
+            self.fuzzy_conv.weight = nn.Parameter(self.fuzzy_weights, requires_grad=False)
             self.fuzzy_conv.requires_grad_(False)
 
-        nn.init.kaiming_uniform_(self.conv.weight)
+    def fuzzy_filter(self):
+        fh, fw = self.dilation[0] + 1, self.dilation[1] + 1
+        filter = np.zeros((fh, fw))
+        for e, v in enumerate(np.linspace(self.mu, 1, int(self.dilation[0] / 2) + 1)):
+            for i in range(int(self.dilation[0] / 2)):
+                filter[e : fh - e, e : fw - e] = v
 
-    def mask_dial(self, kernel_size, dilation, mu):
-        dilation -= 1
-        mid = [0 for i in range(dilation)]
-        lim = (dilation // 2) if (dilation % 2 == 0) else ((dilation // 2) + 1)
-        diff = (1 - mu) / lim
-        filter1 = []
-        for i in range(lim):
-            mid[i] = 1 - (i + 1) * diff
-            mid[dilation - 1 - i] = 1 - (i + 1) * diff
-        for i in range(2 * kernel_size - 1):
-            if i % 2 == 0:
-                filter1 = filter1 + [0]
-            else:
-                filter1 = filter1 + mid
-        filter2 = [[0 for i in range(dilation + 2)] for j in range(dilation)]
-        for i in range(lim):
-            for j in range(i + 2):
-                filter2[i][j] = mid[i]
-                filter2[i][dilation + 1 - j] = mid[i]
-                filter2[dilation - i - 1][j] = mid[i]
-                filter2[dilation - i - 1][dilation + 1 - j] = mid[i]
-            for j in range(i + 1, lim):
-                filter2[i][j + 1] = mid[j]
-                filter2[i][dilation - j] = mid[j]
-                filter2[dilation - i - 1][j + 1] = mid[j]
-                filter2[dilation - i - 1][dilation - j] = mid[j]
-        filter3 = [x[1:] for x in filter2]
-        for i in range(kernel_size - 2):
-            for j in range(len(filter2)):
-                filter2[j] += filter3[j]
-        result = []
-        for i in range(2 * kernel_size - 1):
-            if i % 2 == 0:
-                result = result + [filter1]
-            else:
-                result = result + filter2
-                result = [0 for i in range(2 * kernel_size - 1)]
-        result = []
-        for i in range(2 * kernel_size - 1):
-            if i % 2 == 0:
-                result = result + [filter1]
-            else:
-                result = result + filter2
-        result = torch.Tensor(result)
-        return result
+        filter = np.array(np.broadcast_to(filter, self.fuzzy_conv.weight.shape))
 
-    def forward(self, input_):
-        if self.padding[0] > 0:
-            padr = torch.zeros(input_.size()[0], input_.size()[1], input_.size()[2], self.padding[0]).to(input_.device)
-            padc = torch.zeros(input_.size()[0], input_.size()[1], self.padding[1], input_.size()[3] + self.padding[0] * 2).to(input_.device)
-            input_ = torch.cat((input_, padr), 3)
-            input_ = torch.cat((padr, input_), 3)
-            input_ = torch.cat((input_, padc), 2)
-            input_ = torch.cat((padc, input_), 2)
+        return torch.Tensor(filter)
 
-        conv_out = self.conv(input_)
-        fuzzy_out = (self.fuzzy_conv(input_).permute(0, 2, 3, 1) * self.fuzzy_weight).permute(0, 3, 1, 2)
-
-        return conv_out + fuzzy_out.broadcast_to(conv_out.shape)
+    def forward(self, x):
+        x = self.fuzzy_conv(x)
+        x = self.conv(x)
+        return x
 
 
 class DeepLabV3(_SimpleSegmentationModel):
@@ -183,7 +138,7 @@ class AtrousSeparableConvolution(nn.Module):
         self.body = nn.Sequential(
             # Separable Conv
             # nn.Conv2d( in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, bias=bias, groups=in_channels ),
-            CustomConv(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, bias=bias, groups=in_channels),
+            FuzzyConv(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, bias=bias, groups=in_channels),
             # PointWise Conv
             nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=bias),
         )
@@ -206,7 +161,7 @@ class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation, stride):
         modules = [
             # nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
-            CustomConv(in_channels, out_channels, kernel_size=3, stride=stride, padding=dilation, dilation=dilation, bias=False),
+            FuzzyConv(in_channels, out_channels, kernel_size=3, stride=stride, padding=dilation, dilation=dilation, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         ]
