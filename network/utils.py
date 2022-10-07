@@ -1,20 +1,67 @@
+import numpy as np
+from collections import OrderedDict
 import torch
 import torch.nn as nn
-import numpy as np
+from torch.nn.modules.utils import _pair
 import torch.nn.functional as F
-from collections import OrderedDict
+
+
+class FuzzyConv(nn.Module):
+    """
+    Fuzzy Conv Layer
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, mu=0.1, bias=False, *args, **kwargs):
+        super(FuzzyConv, self).__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = _pair(kernel_size)  # all pairs are considered to be of form (n, n)
+        self.dilation = _pair(dilation)
+        self.padding = _pair(padding)
+        self.stride = _pair(stride)
+        self.mu = mu
+
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, bias=bias, *args, **kwargs)
+        self.fuzzy_conv = nn.Conv2d(
+            in_channels, in_channels, kernel_size=(self.dilation[0] + 1, self.dilation[1] + 1), padding="same", groups=in_channels, bias=False
+        )
+        self.fuzzy_weights = self.fuzzy_filter()
+        with torch.no_grad():
+            assert (
+                self.fuzzy_conv.weight.shape == self.fuzzy_weights.shape
+            ), f"Weight shape not matching, {self.fuzzy_weights.shape} vs {self.fuzzy_conv.weight.shape}"
+            self.fuzzy_conv.weight = nn.Parameter(self.fuzzy_weights, requires_grad=False)
+            self.fuzzy_conv.requires_grad_(False)
+
+    def fuzzy_filter(self):
+        fh, fw = self.dilation[0] + 1, self.dilation[1] + 1
+        filter = np.zeros((fh, fw))
+        for e, v in enumerate(np.linspace(self.mu, 1, int(self.dilation[0] / 2) + 1)):
+            for i in range(int(self.dilation[0] / 2)):
+                filter[e : fh - e, e : fw - e] = v
+
+        filter = np.array(np.broadcast_to(filter, self.fuzzy_conv.weight.shape))
+
+        return torch.Tensor(filter)
+
+    def forward(self, x):
+        x = self.fuzzy_conv(x)
+        x = self.conv(x)
+        return x
+
 
 class _SimpleSegmentationModel(nn.Module):
     def __init__(self, backbone, classifier):
         super(_SimpleSegmentationModel, self).__init__()
         self.backbone = backbone
         self.classifier = classifier
-        
+
     def forward(self, x):
         input_shape = x.shape[-2:]
         features = self.backbone(x)
         x = self.classifier(features)
-        x = F.interpolate(x, size=input_shape, mode='bilinear', align_corners=False)
+        x = F.interpolate(x, size=input_shape, mode="bilinear", align_corners=False)
         return x
 
 
@@ -49,6 +96,7 @@ class IntermediateLayerGetter(nn.ModuleDict):
         >>>     [('feat1', torch.Size([1, 64, 56, 56])),
         >>>      ('feat2', torch.Size([1, 256, 14, 14]))]
     """
+
     def __init__(self, model, return_layers, hrnet_flag=False):
         if not set(return_layers).issubset([name for name, _ in model.named_children()]):
             raise ValueError("return_layers are not present in model")
@@ -71,21 +119,21 @@ class IntermediateLayerGetter(nn.ModuleDict):
     def forward(self, x):
         out = OrderedDict()
         for name, module in self.named_children():
-            if self.hrnet_flag and name.startswith('transition'): # if using hrnet, you need to take care of transition
-                if name == 'transition1': # in transition1, you need to split the module to two streams first
+            if self.hrnet_flag and name.startswith("transition"):  # if using hrnet, you need to take care of transition
+                if name == "transition1":  # in transition1, you need to split the module to two streams first
                     x = [trans(x) for trans in module]
-                else: # all other transition is just an extra one stream split
+                else:  # all other transition is just an extra one stream split
                     x.append(module(x[-1]))
-            else: # other models (ex:resnet,mobilenet) are convolutions in series.
+            else:  # other models (ex:resnet,mobilenet) are convolutions in series.
                 x = module(x)
 
             if name in self.return_layers:
                 out_name = self.return_layers[name]
-                if name == 'stage4' and self.hrnet_flag: # In HRNetV2, we upsample and concat all outputs streams together
+                if name == "stage4" and self.hrnet_flag:  # In HRNetV2, we upsample and concat all outputs streams together
                     output_h, output_w = x[0].size(2), x[0].size(3)  # Upsample to size of highest resolution stream
-                    x1 = F.interpolate(x[1], size=(output_h, output_w), mode='bilinear', align_corners=False)
-                    x2 = F.interpolate(x[2], size=(output_h, output_w), mode='bilinear', align_corners=False)
-                    x3 = F.interpolate(x[3], size=(output_h, output_w), mode='bilinear', align_corners=False)
+                    x1 = F.interpolate(x[1], size=(output_h, output_w), mode="bilinear", align_corners=False)
+                    x2 = F.interpolate(x[2], size=(output_h, output_w), mode="bilinear", align_corners=False)
+                    x3 = F.interpolate(x[3], size=(output_h, output_w), mode="bilinear", align_corners=False)
                     x = torch.cat([x[0], x1, x2, x3], dim=1)
                     out[out_name] = x
                 else:

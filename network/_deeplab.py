@@ -1,57 +1,10 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.nn.modules.utils import _pair
-import numpy as np
-from .utils import _SimpleSegmentationModel
+from .utils import _SimpleSegmentationModel, FuzzyConv
 
 
 __all__ = ["DeepLabV3"]
-
-
-class FuzzyConv(nn.Module):
-    """
-    Fuzzy Conv Layer
-    """
-
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, mu=0.1, bias=False, *args, **kwargs):
-        super(FuzzyConv, self).__init__()
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = _pair(kernel_size)  # all pairs are considered to be of form (n, n)
-        self.dilation = _pair(dilation)
-        self.padding = _pair(padding)
-        self.stride = _pair(stride)
-        self.mu = mu
-
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, bias=bias, *args, **kwargs)
-        self.fuzzy_conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=(self.dilation[0] + 1, self.dilation[1] + 1), padding="same", groups=in_channels, bias=False
-        )
-        self.fuzzy_weights = self.fuzzy_filter()
-        with torch.no_grad():
-            assert (
-                self.fuzzy_conv.weight.shape == self.fuzzy_weights.shape
-            ), f"Weight shape not matching, {self.fuzzy_weights.shape} vs {self.fuzzy_conv.weight.shape}"
-            self.fuzzy_conv.weight = nn.Parameter(self.fuzzy_weights, requires_grad=False)
-            self.fuzzy_conv.requires_grad_(False)
-
-    def fuzzy_filter(self):
-        fh, fw = self.dilation[0] + 1, self.dilation[1] + 1
-        filter = np.zeros((fh, fw))
-        for e, v in enumerate(np.linspace(self.mu, 1, int(self.dilation[0] / 2) + 1)):
-            for i in range(int(self.dilation[0] / 2)):
-                filter[e : fh - e, e : fw - e] = v
-
-        filter = np.array(np.broadcast_to(filter, self.fuzzy_conv.weight.shape))
-
-        return torch.Tensor(filter)
-
-    def forward(self, x):
-        x = self.fuzzy_conv(x)
-        x = self.conv(x)
-        return x
 
 
 class DeepLabV3(_SimpleSegmentationModel):

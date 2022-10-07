@@ -1,11 +1,7 @@
 import torch
 import torch.nn as nn
-
-try:  # for torchvision<0.4
-    from torchvision.models.utils import load_state_dict_from_url
-except:  # for torchvision>=0.4
-    from torch.hub import load_state_dict_from_url
-
+from torch.hub import load_state_dict_from_url
+from ..utils import FuzzyConv
 
 __all__ = ["ResNet", "resnet18", "resnet34", "resnet50", "resnet101", "resnet152", "resnext50_32x4d", "resnext101_32x8d", "wide_resnet50_2", "wide_resnet101_2"]
 
@@ -83,7 +79,10 @@ class Bottleneck(nn.Module):
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = norm_layer(width)
-        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        if dilation > 1:
+            self.conv2 = FuzzyConv(width, width, 3, stride, padding=dilation, groups=groups, bias=False, dilation=dilation)
+        else:
+            self.conv2 = conv3x3(width, width, stride, groups, dilation)
         self.bn2 = norm_layer(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
